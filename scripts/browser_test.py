@@ -36,7 +36,7 @@ document.querySelector('button').onclick=()=>{
 </script>"""
 
 
-def full_history_lookup(page,origin):
+def full_history_lookup(page,origin,token):
     """A lookup finds a thread by an older message, shows it with its time, and View source opens the history there."""
     # The live fixture titled 'Payment retry policy' would match by title. Hiding it leaves only the older message to match.
     titled=next(i for i in page.request.get(origin+'/api/state').json()['sessions'] if i['title']=='Payment retry policy')
@@ -49,16 +49,15 @@ def full_history_lookup(page,origin):
     assert page.request.post(origin+'/api/import',data={'provider':'Claude','account':'History','data':[
         {'uuid':'billing-sync','name':'Billing sync notes','chat_messages':thread},
         {'uuid':'invoice-layout','name':'Invoice layout','chat_messages':decoy}]}).ok
-    seq=page.request.get(origin+'/api/search?q=payment retry policy').json()[0]['seq']
     page.locator('[data-view=map]').click();expect(page.locator('.card').filter(has_text='Billing sync notes')).to_have_count(1,timeout=10000)
     page.locator('#prompt').fill('Where did we leave the payment retry policy?');page.locator('#prompt').press('Enter')
     answer=page.locator('#chat .answer').last
     expect(answer).to_contain_text('Billing sync notes');expect(answer).to_contain_text(older)
     when=datetime.fromtimestamp(datetime.fromisoformat('2025-03-14T12:00:00+00:00').timestamp())
     expect(answer).to_contain_text(re.compile(rf'{when:%b} {when.day}, {when.hour%12 or 12}:{when:%M}\s?{when:%p}'))
-    answer.locator('[data-seq="%d"]'%seq).click()
+    link=answer.locator('[data-seq]');expect(link).to_have_count(1);seq=link.get_attribute('data-seq');link.click()
     match=page.locator('#dialog .history section.match')
-    expect(match).to_have_attribute('data-seq',str(seq));expect(match).to_contain_text(older);expect(match).to_be_in_viewport()
+    expect(match).to_have_attribute('data-seq',seq);expect(match).to_contain_text(older);expect(match).to_be_in_viewport()
     page.locator('#closeDialog').click()
 
 
@@ -101,7 +100,7 @@ def older_match_stays_unread(page,origin,token):
     assert unread()
 
 
-def far_apart_terms_route(page,origin):
+def far_apart_terms_route(page,origin,token):
     """Routing counts every query word in the matched message, not only the words in its excerpt."""
     filler=' '.join(['and then we compared every number in the quarterly sheet with the bank export line by line']*4)
     show(page,origin,claude_thread('month-end','Month-end notes',('human','The ledger '+filler+' cutoff is the 25th.'),('assistant','Archived.')),
@@ -110,7 +109,7 @@ def far_apart_terms_route(page,origin):
     expect(answer).to_contain_text('Month-end notes');expect(answer).not_to_contain_text('Which thread')
 
 
-def latest_reply_identity(page,origin):
+def latest_reply_identity(page,origin,token):
     """The matched message is shown apart from the latest reply exactly when it is a different message."""
     older='Webhook timeout is now 30 seconds.'
     filler=' '.join('Paragraph %d lists the folders we moved.'%n for n in range(80))
@@ -121,12 +120,15 @@ def latest_reply_identity(page,origin):
     answer=ask(page,'Where did we leave the webhook timeout?')
     expect(answer.locator('.quote')).to_have_count(2);expect(answer.locator('.quote').first).to_contain_text('Matched message')
     expect(answer.locator('.quote').first).to_contain_text(older);expect(answer.locator('.quote').first.locator('[data-seq]')).to_have_count(1)
-    # A latest reply that matched past the stored cut is shown once.
+    # A latest reply that matched past the stored cut is shown once, as the matched message with its link.
     answer=ask(page,'Where did we leave the archive retention window?')
     expect(answer).to_contain_text('Archive notes');expect(answer.locator('.quote')).to_have_count(1)
+    expect(answer.locator('.quote')).to_contain_text('ninety days');answer.locator('[data-seq]').click()
+    expect(page.locator('#dialog .history section.match')).to_contain_text('The archive retention window is ninety days.')
+    page.locator('#closeDialog').click()
 
 
-def older_match_choices(page,origin):
+def older_match_choices(page,origin,token):
     """Threads matched only by older messages are offered as choices, never sent to unasked."""
     cadence='Dunning cadence: reminders go out every three days.'
     show(page,origin,claude_thread('accounts','Accounts follow-up',('human',cadence),('assistant','Sent the summary.')),
@@ -143,7 +145,7 @@ def older_match_choices(page,origin):
     expect(answer.locator('.choice')).to_contain_text('Vendor payouts')
 
 
-def provider_scoped_lookup(page,origin):
+def provider_scoped_lookup(page,origin,token):
     """A request that names a provider searches that provider's history, so stronger matches elsewhere cannot crowd it out."""
     def chatgpt(n):
         node=lambda key,role,text,parent:{'message':{'id':key,'author':{'role':role},'content':{'parts':[text]},'create_time':1743500000+n},'parent':parent}
@@ -157,7 +159,67 @@ def provider_scoped_lookup(page,origin):
     expect(answer).to_contain_text('Quarterly close');expect(answer).to_contain_text(older)
 
 
+def live_thread(page,origin,token,source,title,*messages):
+    """A connected, writable Claude tab, so the dashboard can send to it directly."""
+    return page.request.post(origin+'/bridge/sync',headers={'Authorization':'Bearer '+token},data={
+        'provider':'Claude','account':'Personal','source':source,'tab':'tab-'+source+'-0001','title':title,'writable':True,
+        'messages':[{'id':source+'-'+str(n),'role':role,'text':text} for n,(role,text) in enumerate(messages)]}).json()['session']
+
+
+def sent(page,origin,sid):
+    """How many messages the dashboard has sent to a session."""
+    return sum(d['session']==sid for d in page.request.get(origin+'/api/state').json()['deliveries'])
+
+
+def pending_lookup_keeps_target(page,origin,token):
+    """Pinning another thread while a lookup is still searching does not turn the lookup into a send there."""
+    older='Agreed vendor escalation matrix: page the account owner first.'
+    show(page,origin,claude_thread('vendor-escalation','Vendor contacts',('human',older),('assistant','Saved the contact sheet.')))
+    sid=live_thread(page,origin,token,'standup-notes','Standup notes',('user','Collect the notes.'),('assistant','Collected the notes.'))
+    expect(page.locator('.card').filter(has_text='Standup notes')).to_have_count(1,timeout=10000)
+    held=[]
+    page.route('**/api/search*',lambda r:held.append(r))
+    question='Where did we leave the vendor escalation matrix?'
+    page.locator('#prompt').fill(question);page.locator('#prompt').press('Enter')
+    page.locator('.card').filter(has_text='Standup notes').click();page.locator('#dialog [data-pick]').click()
+    expect(page.locator('#mode')).to_have_value('send')
+    # The dashboard searches before it answers. Wait up to 5 s for that search to be held, then let it through.
+    for _ in range(100):
+        if held:break
+        page.wait_for_timeout(50)
+    for r in held:r.continue_()
+    page.unroute('**/api/search*')
+    answer=answer_to(page,question)
+    expect(answer).to_contain_text('Vendor contacts');expect(answer).to_contain_text(older)
+    assert sent(page,origin,sid)==0
+    page.locator('[data-clear]').click()
+
+
+def long_draft_lookup_and_send(page,origin,token):
+    """Drafts longer than a URL allows still find a thread by an older message, and still send to a pinned thread."""
+    older='Agreed chargeback evidence checklist: receipts, shipping proof and the customer emails.'
+    show(page,origin,claude_thread('chargebacks','Dispute handling',('human',older),('assistant','Filed the template.')))
+    question='Where did we leave the chargeback evidence checklist? '+'x'*9000
+    page.locator('#prompt').fill(question);page.locator('#prompt').press('Enter')
+    answer=page.locator('#chat .utter').last.locator('xpath=following-sibling::div[contains(@class,"answer")][1]')
+    expect(answer).to_contain_text('Dispute handling');expect(answer).to_contain_text(older)
+    sid=live_thread(page,origin,token,'release-notes','Release notes',('user','Draft the notes.'),('assistant','Drafted the notes.'))
+    card=page.locator('.card').filter(has_text='Release notes');expect(card).to_have_count(1,timeout=10000)
+    card.click();page.locator('#dialog [data-pick]').click()
+    draft='Please apply this patch. '+'y'*9000
+    page.locator('#prompt').fill(draft);page.locator('#prompt').press('Enter')
+    expect(page.locator('#chat .answer').last).to_contain_text('Release notes')
+    assert sent(page,origin,sid)==1
+    page.locator('[data-clear]').click()
+
+
+STEPS=[full_history_lookup,older_match_stays_unread,far_apart_terms_route,latest_reply_identity,older_match_choices,
+       provider_scoped_lookup,pending_lookup_keeps_target,long_draft_lookup_and_send]
+
+
 def main():
+    # Step names given as arguments run only those full-history steps, after the shared checks.
+    steps=[next(f for f in STEPS if f.__name__==name) for name in sys.argv[1:]] or STEPS
     with tempfile.TemporaryDirectory() as tmp,sync_playwright() as p:
         d=Path(tmp);ext=ROOT/'extension'
         with socket.socket() as sock:sock.bind(('127.0.0.1',0));port=sock.getsockname()[1]
@@ -259,12 +321,7 @@ def main():
             page.goto(old_url);expect(page.locator('#dialogContent')).to_contain_text(notification['body'])
             assert page.request.post(origin+'/api/edit',data={'id':notification['session'],'hidden':True}).ok
             page.reload();expect(page.locator('h1')).to_have_text('Inbox');expect(page.locator('#dialog')).not_to_be_visible()
-            full_history_lookup(page,origin)
-            older_match_stays_unread(page,origin,token)
-            far_apart_terms_route(page,origin)
-            latest_reply_identity(page,origin)
-            older_match_choices(page,origin)
-            provider_scoped_lookup(page,origin)
+            for step in steps:step(page,origin,token)
             assert not errors,errors
             ctx.close();print('PASS: both extension DOM round trips, badge receipts, read-only ZIP import, lookup, routing, drag, hide/restore, reload, language switch, authorization, 4 widths, a 103-session map, and full-history lookups and routing.')
         finally:proc.terminate();proc.wait(timeout=20)

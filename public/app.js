@@ -61,8 +61,10 @@ function redraw(){
  $('statusline').textContent=(state.scan==='Ready'?l('Synced locally','로컬 동기화됨'):state.scan||l('Connecting…','연결 중…'))+' · '+stamp(state.lastScan);
  renderChat();preview();
 }
-function plan(text,hits){return route(text,state.sessions,focus,$('mode').value,locked,hits);}
-async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q)+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
+// `at` is the reply target and mode a request was made with, so a later change cannot redirect it.
+function plan(text,hits,at={focus,mode:$('mode').value,locked}){return route(text,state.sessions,at.focus,at.mode,at.locked,hits);}
+// Only the start of a long draft is searched, which keeps the request within the server's URL limit.
+async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q.slice(0,500))+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
 function preview(){
  const value=$('prompt').value.trim(),target=item(focus);
  if(!value&&target&&!target.hidden){$('dest').innerHTML='↳ '+escape(path(target))+' · '+escape(target.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>';return;}
@@ -76,7 +78,9 @@ function renderChat(){
  const html=messages.map((m,n)=>{
   if(m.kind==='user')return '<div class="utter">'+escape(m.body)+'</div>';
   let h='';
-  if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?'<div class="quote"><span class="sub">'+l('Matched message','일치한 메시지')+' · '+stamp(m.match.at)+'</span><p>'+escape(m.match.snippet)+'</p><button class="linkbtn" data-card="'+m.session+'" data-seq="'+m.match.seq+'">'+l('View source','원문 보기')+' ↗</button></div>':'')+'<div class="quote"><span class="sub">'+escape(m.provider)+' · '+stamp(m.at)+'</span><p>'+escape(m.body)+'</p><button class="linkbtn" data-card="'+m.session+'">'+l('View source','원문 보기')+' ↗</button></div>';
+  const quote=(label,at,body,seq)=>'<div class="quote"><span class="sub">'+label+' · '+stamp(at)+'</span><p>'+escape(body)+'</p><button class="linkbtn" data-card="'+m.session+'"'+(seq?' data-seq="'+seq+'"':'')+'>'+l('View source','원문 보기')+' ↗</button></div>';
+  // The matched message is shown apart from the latest reply unless it is that reply.
+  if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?quote(escape(m.provider)+' · '+l('Matched message','일치한 메시지'),m.match.at,m.match.snippet,m.match.seq):'')+(m.match?.latest?'':quote(escape(m.provider),m.at,m.body));
   if(m.kind==='choose')h=l('Which thread did you mean?','어느 스레드인가요?')+'<div class="replyopts">'+m.ids.map(id=>{const i=item(id);return i&&!i.hidden?'<button '+(m.chosen?'disabled':'')+' class="choice" data-select="'+id+'" data-n="'+n+'"><b>'+escape(path(i))+'</b> · '+escape(i.provider)+'<br>'+escape(i.latest.slice(0,125))+'</button>':'';}).join('')+'</div>';
   if(m.kind==='delivery'){const d=state.deliveries.find(d=>d.id===m.key);h='<b>'+escape(m.path)+'</b><div class="quote"><span>'+escape(d?.status||m.status||'queued')+'</span><p>'+escape(d?.detail&&['failed','uncertain'].includes(d.status)?d.detail:m.body)+'</p></div>';}
   if(m.kind==='readonly')h='<b>'+escape(m.path)+'</b><p>'+l('Read-only. Copy the draft to the original conversation.','읽기 전용입니다. 원본 대화로 초안을 복사하세요.')+'</p><button class="choice" data-copy="'+n+'">'+l('Copy draft','초안 복사')+'</button> <button class="choice" data-card="'+m.session+'">'+l('View source','원문 보기')+'</button>';
@@ -114,9 +118,7 @@ async function detail(id,seq){
 async function edit(id,changes){await api('edit',{id,...changes});await refresh(true);}
 async function handle(i,body,action,key,match){
  if(!i||i.hidden)throw Error(l('Session unavailable','세션을 사용할 수 없습니다'));
- if(!action){pin(i.id,false);
-  const older=match&&!match.latest?match:null;
-  push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match:older});return;}
+ if(!action){pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match});return;}
  if(!i.direct){push({kind:'readonly',path:path(i),session:i.id,body});return;}
  const d=await api('send',{id:key,session:i.id,body});pin(i.id,false);push({kind:'delivery',session:i.id,key,body,path:path(i),status:d.status});await refresh(true);
 }
@@ -124,7 +126,9 @@ $('composer').onsubmit=async e=>{
  e.preventDefault();const body=$('prompt').value.trim();if(!body)return;
  const key=draftID||crypto.randomUUID();draftID=key;save('draftID',key);
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
- try{const hits=await search(body),p=plan(body,hits),match=id=>hits.find(f=>f.session===id);
+ try{const at={focus,mode:$('mode').value,locked},pinned=plan(body,[],at);
+  // A send to the locked reply target needs no search.
+  const hits=at.locked&&pinned.action&&pinned.candidates[0]?.id===at.focus?[]:await search(body),p=plan(body,hits,at),match=id=>hits.find(f=>f.session===id);
   if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:l('No matching visible session.','일치하는 세션이 없습니다.')});
   else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key,match(p.candidates[0].id));
