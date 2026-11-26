@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import closing
@@ -148,6 +149,37 @@ class SearchTests(unittest.TestCase):
         self.data=Path(self.tmp.name)/'fresh'
         self.start().stop()
         self.assertEqual(self.version(),1)
+
+    def test_newer_database_is_left_unchanged(self):
+        self.start().stop()
+        with closing(sqlite3.connect(self.data/'atlas.sqlite')) as db,db:db.execute('PRAGMA user_version=2')
+        try:
+            run=subprocess.run([sys.executable,'-m','atlas','--data',str(self.data),'--codex-dir',str(self.data/'none1'),
+                                '--claude-dir',str(self.data/'none2'),'--no-open','--port','0'],cwd=ROOT,capture_output=True,text=True,timeout=30)
+        except subprocess.TimeoutExpired:self.fail('Thread Atlas kept running on a database from a newer version')
+        self.assertNotEqual(run.returncode,0)
+        self.assertIn('Database schema version 2 is newer than this Thread Atlas supports',run.stderr)
+        self.assertEqual(self.version(),2)
+
+    def test_history_rejects_invalid_message_numbers(self):
+        atlas=self.start()
+        sid=atlas.thread('numbers','Number check',('human','Count the rows.'),('assistant','Counted.'))
+        for seq in ('abc','0','123456789012345678901234567890'):
+            with self.assertRaises(urllib.error.HTTPError) as caught:atlas.get('history',id=sid,seq=seq)
+            self.assertEqual((caught.exception.code,json.loads(caught.exception.read())),(400,{'error':'Invalid message number'}))
+        # A well-formed number that matches no message opens the latest messages.
+        self.assertEqual([m['body'] for m in atlas.get('history',id=sid,seq='9999999999999999999')],['Count the rows.','Counted.'])
+
+    def test_search_falls_back_to_common_terms(self):
+        atlas=self.start()
+        closed=atlas.thread('close','Month close',('human','The ledger is closed for March.'))
+        audit=atlas.thread('audit','Audit prep',('human','The ledger needs a second review.'))
+        vendors=atlas.thread('vendors','Vendor list',('human','Check the vendor names.'))
+        # "ledger" is in most messages and "reconcile" in none, so the common term is what can still find a thread.
+        self.assertEqual(sorted(f['session'] for f in atlas.search('ledger reconcile')),sorted([closed,audit]))
+        # The same holds when the rare term is only in a hidden thread.
+        atlas.post('/api/edit',{'id':vendors,'hidden':True})
+        self.assertEqual(sorted(f['session'] for f in atlas.search('ledger vendor')),sorted([closed,audit]))
 
     def test_korean_lookup_matches_inflected_forms(self):
         atlas=self.start()

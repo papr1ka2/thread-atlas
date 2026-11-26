@@ -100,6 +100,8 @@ class Store:
     def migrate(self):
         with self.tx():
             version=self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version>len(MIGRATIONS):raise RuntimeError(f'Database schema version {version} is newer than this Thread Atlas supports')
+            if version==len(MIGRATIONS):return
             statement=''
             for line in ''.join(MIGRATIONS[version:]).splitlines(keepends=True):
                 statement+=line
@@ -272,16 +274,10 @@ class Store:
         terms it contains, and whether it is the session's latest reply."""
         words=terms(text)
         if not words:return []
-        # English terms are matched by their Porter stem; Korean terms by prefix, so particles still attached to the
-        # indexed word ("정책은") do not stop the bare term ("정책") from matching.
+        # English terms are matched by their Porter stem; other terms, such as Korean, by prefix, so particles still
+        # attached to the indexed word ("정책은") do not stop the bare term ("정책") from matching.
         match=lambda ws:' OR '.join('"'+w+'"'+('' if w.isascii() else '*') for w in ws)
-        # The queries below read one snapshot, so an edit in between cannot drop a ranked message's excerpt.
-        self.db.execute("BEGIN")
-        try:
-            # Terms in over half the messages are skipped; when all are, the newest messages rank first.
-            total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
-            distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
-            query,order=(match(distinct),'f.rank') if distinct else (match(words),'f.rowid DESC')
+        def ranked(query,order):
             best={}
             rows=self.db.execute(f"""SELECT m.session,m.seq,m.role,m.at FROM messages_fts f JOIN messages m ON m.seq=f.rowid
               JOIN sessions s ON s.id=m.session WHERE messages_fts MATCH ? AND s.hidden=0 AND (? IS NULL OR s.provider=?)
@@ -291,13 +287,24 @@ class Store:
                 best[r['session']]=dict(r)
                 if len(best)==20:break
             rows.close()
+            return best
+        # The queries below read one snapshot, so an edit in between cannot drop a ranked message's excerpt.
+        self.db.execute("BEGIN")
+        try:
+            # Terms in over half the messages are skipped. When all are, or the rest match no visible message of the
+            # provider, every term is searched and the most recently stored messages come first.
+            total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
+            distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
+            query=match(distinct)
+            best=ranked(query,'f.rank') if distinct else {}
+            if not best and distinct!=words:query=match(words);best=ranked(query,'f.rowid DESC')
             found=list(best.values());seqs=[b['seq'] for b in found];marks=','.join('?'*len(seqs))
             excerpts=dict(self.db.execute(f"""SELECT rowid,snippet(messages_fts,0,'','','…',32) FROM messages_fts
               WHERE messages_fts MATCH ? AND rowid IN ({marks})""",(query,*seqs)))
             held={w:{r[0] for r in self.db.execute(f"SELECT rowid FROM messages_fts WHERE messages_fts MATCH ? AND rowid IN ({marks})",(match([w]),*seqs))} for w in words}
-            # The latest reply is stored as text, so the newest assistant message with that text is the one it shows.
+            # The session keeps the latest reply's text and time, so the assistant message with both is that reply.
             latest={r[0] for r in self.db.execute(f"""SELECT (SELECT m.seq FROM messages m WHERE m.session=s.id AND +m.role='assistant'
-              AND substr(m.body,1,2200)=s.latest ORDER BY m.at DESC,m.seq DESC LIMIT 1) FROM sessions s WHERE s.id IN ({marks})""",list(best))}
+              AND m.at=s.latest_at AND substr(m.body,1,2200)=s.latest ORDER BY m.seq DESC LIMIT 1) FROM sessions s WHERE s.id IN ({marks})""",list(best))}
         finally:self.db.execute("COMMIT")
         for b in found:
             b.update(snippet=excerpts[b['seq']],terms=[w for w in words if b['seq'] in held[w]],latest=b['seq'] in latest)
