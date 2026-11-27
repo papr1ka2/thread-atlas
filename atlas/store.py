@@ -291,8 +291,7 @@ class Store:
         # The queries below read one snapshot, so an edit in between cannot drop a ranked message's excerpt.
         self.db.execute("BEGIN")
         try:
-            # Terms in over half the messages are skipped. When all are, or the rest match no visible message of the
-            # provider, every term is searched and the most recently stored messages come first.
+            # Terms in over half the messages are skipped unless the rest find nothing.
             total=self.db.execute("SELECT count(*) FROM messages").fetchone()[0]
             distinct=[w for w in words if 2*self.db.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH ?",(match([w]),)).fetchone()[0]<=total]
             query=match(distinct)

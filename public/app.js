@@ -79,7 +79,6 @@ function renderChat(){
   if(m.kind==='user')return '<div class="utter">'+escape(m.body)+'</div>';
   let h='';
   const quote=(label,at,body,seq)=>'<div class="quote"><span class="sub">'+label+' · '+stamp(at)+'</span><p>'+escape(body)+'</p><button class="linkbtn" data-card="'+m.session+'"'+(seq?' data-seq="'+seq+'"':'')+'>'+l('View source','원문 보기')+' ↗</button></div>';
-  // The matched message is shown apart from the latest reply unless it is that reply.
   if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?quote(escape(m.provider)+' · '+l('Matched message','일치한 메시지'),m.match.at,m.match.snippet,m.match.seq):'')+(m.match?.latest?'':quote(escape(m.provider),m.at,m.body));
   if(m.kind==='choose')h=l('Which thread did you mean?','어느 스레드인가요?')+'<div class="replyopts">'+m.ids.map(id=>{const i=item(id);return i&&!i.hidden?'<button '+(m.chosen?'disabled':'')+' class="choice" data-select="'+id+'" data-n="'+n+'"><b>'+escape(path(i))+'</b> · '+escape(i.provider)+'<br>'+escape(i.latest.slice(0,125))+'</button>':'';}).join('')+'</div>';
   if(m.kind==='delivery'){const d=state.deliveries.find(d=>d.id===m.key);h='<b>'+escape(m.path)+'</b><div class="quote"><span>'+escape(d?.status||m.status||'queued')+'</span><p>'+escape(d?.detail&&['failed','uncertain'].includes(d.status)?d.detail:m.body)+'</p></div>';}
@@ -127,7 +126,6 @@ $('composer').onsubmit=async e=>{
  const key=draftID||crypto.randomUUID();draftID=key;save('draftID',key);
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
  try{const at={focus,mode:$('mode').value,locked},pinned=plan(body,[],at);
-  // A send to the locked reply target needs no search.
   const hits=at.locked&&pinned.action&&pinned.candidates[0]?.id===at.focus?[]:await search(body),p=plan(body,hits,at),match=id=>hits.find(f=>f.session===id);
   if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:l('No matching visible session.','일치하는 세션이 없습니다.')});
