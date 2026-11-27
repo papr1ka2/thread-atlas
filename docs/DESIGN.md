@@ -40,7 +40,7 @@ Hiding a session is reversible. The product should retain grouping and visibilit
 
 | Message | Expected behavior |
 | --- | --- |
-| “Where did we leave the login bug?” | Search local history and show the latest source reply with its timestamp. |
+| “Where did we leave the login bug?” | Search the full local message history. Show the matching message and the latest source reply, each with its timestamp. |
 | “Then run the tests.” | Continue the thread just found. Check whether it accepts replies and show the destination in the composer. |
 | “Set payment retries to three.” | The newly named topic points to the payments thread, even when the previous search found the login bug. |
 | “Ask Claude why the limit is three.” | Treat this as a request to send a question. Match the provider, account, and topic. Show the latest messages if the candidates are ambiguous. |

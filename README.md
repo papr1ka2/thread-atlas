@@ -39,7 +39,7 @@ For Codex, keep the local App Server daemon running. On versions with daemon man
 ## Use the workspace
 
 - Drag a card into a project, onto **Hidden**, or onto the composer to pin a reply target. Use card details for equivalent move and hide controls.
-- Ask **“Where did we leave the payment retry policy?”** to retrieve a source message. Type **“Then run the tests”** to continue it. The destination appears before you send. Ambiguous requests offer candidates. **Find** and **Send to thread** let you explicitly select an intent.
+- Ask **“Where did we leave the payment retry policy?”** to retrieve a source message. Lookups search every stored message. The answer shows the matching message with its time, next to the latest reply when they differ, and **View source** opens the history at that message. Type **“Then run the tests”** to continue it. The destination appears before you send. Ambiguous requests offer candidates. **Find** and **Send to thread** let you explicitly select an intent.
 - **Inbox** shows latest replies. **Reply here** pins the thread, while simply opening a source shows its history. New replies do not redirect a draft.
 - Enable **Local notifications** under Connections to receive macOS notifications while the collector runs. Allow **Thread Atlas Alerts** when macOS asks. Clicking a banner opens that specific reply in the local inbox. The release bundles the notification helper. Running from source on macOS builds it once using the Xcode command line tools. Optional Telegram notifications use the environment variables `ATLAS_TELEGRAM_TOKEN` and `ATLAS_TELEGRAM_CHAT` supplied at launch. Only the thread title is sent. Delivery to Telegram needs a configured bot and recipient.
 - Delivery receipts distinguish queued, sending, delivered, answered, failed, and uncertain. After an uncertain send, inspect the original thread before submitting a new draft.
@@ -63,7 +63,7 @@ uv run playwright install chromium
 uv run python scripts/browser_test.py
 ```
 
-The browser test launches an isolated Chromium profile, loads the actual extension, and uses local fixtures in place of the two provider websites. An additional opt-in test uses your authenticated models, creates four disposable conversations, and consumes model usage.
+The browser test launches an isolated Chromium profile, loads the actual extension, and uses local fixtures in place of the two provider websites. Name full-history steps as arguments, for example `uv run python scripts/browser_test.py older_match_choices`, to run only those after the shared checks. An additional opt-in test uses your authenticated models, creates four disposable conversations, and consumes model usage.
 
 ```sh
 uv run python scripts/live_test.py --live

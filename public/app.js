@@ -1,11 +1,12 @@
-import {route} from './router.js';
+import {named,route} from './router.js';
 const $=id=>document.getElementById(id);
 const escape=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const load=(key,def)=>{try{return JSON.parse(localStorage.getItem('atlas:'+key))??def;}catch{return def;}};
 const save=(key,obj)=>localStorage.setItem('atlas:'+key,JSON.stringify(obj));
 let lang=load('lang','en'),view='map',filter=null,focus=load('target',null),locked=load('locked',false);
 let folded=new Set(load('folded',[])),messages=load('chat',[]),state={sessions:[],groups:[],inbox:[],deliveries:[]};
-let received=null,ready=false,polling=false,requestSeq=0,appliedSeq=0,dragging=false,lastPaint='',timer,draftID=load('draftID',null);
+let received=null,ready=false,polling=false,requestSeq=0,appliedSeq=0,dragging=false,lastPaint='',timer,searchTimer,draftID=load('draftID',null);
+let found={q:null,hits:[]};
 const l=(en,ko)=>lang==='ko'?ko:en;
 const labels={map:['Work map','작업 지도'],inbox:['Inbox','받은 답변'],hidden:['Hidden','숨김'],projects:['Projects','프로젝트'],connections:['Connections','연결 범위'],newGroup:['New project','새 프로젝트'],workspace:['Workspace','워크스페이스'],myWork:['My work','내 작업'],mainChat:['Main chat','메인 대화'],message:['Message','메시지'],send:['Send','보내기'],close:['Close','닫기']};
 const text=key=>l(...labels[key]);
@@ -60,11 +61,14 @@ function redraw(){
  $('statusline').textContent=(state.scan==='Ready'?l('Synced locally','로컬 동기화됨'):state.scan||l('Connecting…','연결 중…'))+' · '+stamp(state.lastScan);
  renderChat();preview();
 }
-function plan(){return route($('prompt').value,state.sessions,focus,$('mode').value,locked);}
+// `at` is the reply target and mode a request was made with, so a later change cannot redirect it.
+function plan(text,hits,at={focus,mode:$('mode').value,locked}){return route(text,state.sessions,at.focus,at.mode,at.locked,hits);}
+// Only the start of a long draft is searched, which keeps the request within the server's URL limit.
+async function search(q){const provider=named(q),hits=await api('search?q='+encodeURIComponent(q.slice(0,500))+(provider?'&provider='+encodeURIComponent(provider):''));if(q===$('prompt').value.trim())found={q,hits};return hits;}
 function preview(){
  const value=$('prompt').value.trim(),target=item(focus);
  if(!value&&target&&!target.hidden){$('dest').innerHTML='↳ '+escape(path(target))+' · '+escape(target.provider)+' <button type="button" data-clear>'+l('Clear','해제')+'</button>';return;}
- const p=value?plan():null;
+ const p=value?plan(value,found.q===value?found.hits:[]):null;
  $('dest').textContent=!p?l('Destination · Match from message','보낼 곳 · 메시지에서 찾기'):!p.action?l('Search local history','내 기록에서 찾기'):p.candidates.length!==1?l('Choose a destination','대상 선택'):p.confirm?l('Confirm before sending · ','전송 전 확인 · ')+path(p.candidates[0])+' · '+p.candidates[0].provider:(p.candidates[0].direct?l('To · ','보낼 곳 · '):l('Read-only · ','읽기 전용 · '))+path(p.candidates[0])+' · '+p.candidates[0].provider;
 }
 function pin(id,explicit){const i=item(id);if(!i||i.hidden)return;focus=id;locked=explicit;save('target',focus);save('locked',locked);folded.delete(i.group_id);save('folded',[...folded]);view='map';filter=null;redraw();}
@@ -74,7 +78,8 @@ function renderChat(){
  const html=messages.map((m,n)=>{
   if(m.kind==='user')return '<div class="utter">'+escape(m.body)+'</div>';
   let h='';
-  if(m.kind==='source')h='<b>'+escape(m.path)+'</b><div class="quote"><span class="sub">'+escape(m.provider)+' · '+stamp(m.at)+'</span><p>'+escape(m.body)+'</p><button class="linkbtn" data-card="'+m.session+'">'+l('View source','원문 보기')+' ↗</button></div>';
+  const quote=(label,at,body,seq)=>'<div class="quote"><span class="sub">'+label+' · '+stamp(at)+'</span><p>'+escape(body)+'</p><button class="linkbtn" data-card="'+m.session+'"'+(seq?' data-seq="'+seq+'"':'')+'>'+l('View source','원문 보기')+' ↗</button></div>';
+  if(m.kind==='source')h='<b>'+escape(m.path)+'</b>'+(m.match?quote(escape(m.provider)+' · '+l('Matched message','일치한 메시지'),m.match.at,m.match.snippet,m.match.seq):'')+(m.match?.latest?'':quote(escape(m.provider),m.at,m.body));
   if(m.kind==='choose')h=l('Which thread did you mean?','어느 스레드인가요?')+'<div class="replyopts">'+m.ids.map(id=>{const i=item(id);return i&&!i.hidden?'<button '+(m.chosen?'disabled':'')+' class="choice" data-select="'+id+'" data-n="'+n+'"><b>'+escape(path(i))+'</b> · '+escape(i.provider)+'<br>'+escape(i.latest.slice(0,125))+'</button>':'';}).join('')+'</div>';
   if(m.kind==='delivery'){const d=state.deliveries.find(d=>d.id===m.key);h='<b>'+escape(m.path)+'</b><div class="quote"><span>'+escape(d?.status||m.status||'queued')+'</span><p>'+escape(d?.detail&&['failed','uncertain'].includes(d.status)?d.detail:m.body)+'</p></div>';}
   if(m.kind==='readonly')h='<b>'+escape(m.path)+'</b><p>'+l('Read-only. Copy the draft to the original conversation.','읽기 전용입니다. 원본 대화로 초안을 복사하세요.')+'</p><button class="choice" data-copy="'+n+'">'+l('Copy draft','초안 복사')+'</button> <button class="choice" data-card="'+m.session+'">'+l('View source','원문 보기')+'</button>';
@@ -102,26 +107,30 @@ async function refresh(force=false){
 
  }catch(e){$('statusline').textContent=l('Disconnected · ','연결 끊김 · ')+e.message;}finally{polling=false;}
 }
-async function detail(id){
- const i=item(id);if(!i)return;const history=await api('history?id='+encodeURIComponent(id));await api('edit',{id,read:true});
- dialog(name(i),'<p class="sub">'+escape(i.provider)+' · '+escape(i.account)+' · '+escape(path(i))+'</p><p>'+escape(status(i))+' · '+l('Last seen ','마지막 확인 ')+stamp(i.synced_at)+'</p><div class="actions"><button class="choice" data-pick="'+i.id+'">'+l('Reply here','이어서 답장')+'</button><button class="choice" data-hide="'+i.id+'">'+l('Hide','숨김')+'</button>'+(i.url?'<a class="choice" target="_blank" rel="noopener noreferrer" href="'+escape(i.url)+'">'+l('Open original','원본 열기')+'</a>':'')+'</div><label class="modalfield">'+l('Move to project','프로젝트 이동')+'<select id="moveSelect">'+state.groups.map(g=>'<option value="'+g.id+'" '+(g.id===i.group_id?'selected':'')+'>'+escape(g.name)+'</option>').join('')+'</select></label><div class="history">'+history.map(m=>'<section><strong>'+escape(m.role)+'</strong> <small>'+stamp(m.at)+'</small><p>'+escape(m.body)+'</p></section>').join('')+'</div>');
- $('moveSelect').onchange=async e=>{try{await edit(id,{group:e.target.value});$('dialog').close();}catch(e){toast(e.message);}};const hist=$('dialogContent').querySelector('.history');hist.scrollTop=hist.scrollHeight;await refresh(true);
+async function detail(id,seq){
+ const i=item(id);if(!i)return;const history=await api('history?id='+encodeURIComponent(id)+(seq?'&seq='+seq:''));
+ // A window around an older message leaves newer replies unseen.
+ if(!seq)await api('edit',{id,read:true});
+ dialog(name(i),'<p class="sub">'+escape(i.provider)+' · '+escape(i.account)+' · '+escape(path(i))+'</p><p>'+escape(status(i))+' · '+l('Last seen ','마지막 확인 ')+stamp(i.synced_at)+'</p><div class="actions"><button class="choice" data-pick="'+i.id+'">'+l('Reply here','이어서 답장')+'</button><button class="choice" data-hide="'+i.id+'">'+l('Hide','숨김')+'</button>'+(i.url?'<a class="choice" target="_blank" rel="noopener noreferrer" href="'+escape(i.url)+'">'+l('Open original','원본 열기')+'</a>':'')+'</div><label class="modalfield">'+l('Move to project','프로젝트 이동')+'<select id="moveSelect">'+state.groups.map(g=>'<option value="'+g.id+'" '+(g.id===i.group_id?'selected':'')+'>'+escape(g.name)+'</option>').join('')+'</select></label><div class="history">'+history.map(m=>'<section data-seq="'+m.seq+'"'+(String(m.seq)===seq?' class="match"':'')+'><strong>'+escape(m.role)+'</strong> <small>'+stamp(m.at)+'</small><p>'+escape(m.body)+'</p></section>').join('')+'</div>');
+ $('moveSelect').onchange=async e=>{try{await edit(id,{group:e.target.value});$('dialog').close();}catch(e){toast(e.message);}};const hist=$('dialogContent').querySelector('.history'),match=hist.querySelector('.match');if(match)match.scrollIntoView({block:'center'});else hist.scrollTop=hist.scrollHeight;await refresh(true);
 }
 async function edit(id,changes){await api('edit',{id,...changes});await refresh(true);}
-async function handle(i,body,action,key){
+async function handle(i,body,action,key,match){
  if(!i||i.hidden)throw Error(l('Session unavailable','세션을 사용할 수 없습니다'));
- if(!action){pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.')});return;}
+ if(!action){pin(i.id,false);push({kind:'source',session:i.id,path:path(i),provider:i.provider,at:i.latest_at,body:i.latest||l('No assistant reply yet.','아직 답변이 없습니다.'),match});return;}
  if(!i.direct){push({kind:'readonly',path:path(i),session:i.id,body});return;}
  const d=await api('send',{id:key,session:i.id,body});pin(i.id,false);push({kind:'delivery',session:i.id,key,body,path:path(i),status:d.status});await refresh(true);
 }
 $('composer').onsubmit=async e=>{
- e.preventDefault();const body=$('prompt').value.trim();if(!body)return;const p=plan();
+ e.preventDefault();const body=$('prompt').value.trim();if(!body)return;
  const key=draftID||crypto.randomUUID();draftID=key;save('draftID',key);
  const submit=$('composer').querySelector('[type=submit]');if(submit.disabled)return;submit.disabled=true;
- try{if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
+ try{const at={focus,mode:$('mode').value,locked},pinned=plan(body,[],at);
+  const hits=at.locked&&pinned.action&&pinned.candidates[0]?.id===at.focus?[]:await search(body),p=plan(body,hits,at),match=id=>hits.find(f=>f.session===id);
+  if(!messages.some(m=>m.kind==='user'&&m.key===key))push({kind:'user',body,key});
   if(!p.candidates.length)push({kind:'info',body:l('No matching visible session.','일치하는 세션이 없습니다.')});
-  else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key);
-  else push({kind:'choose',ids:p.candidates.map(i=>i.id),body,action:p.action,key});
+  else if(p.candidates.length===1&&!p.waiting&&!p.confirm)await handle(p.candidates[0],body,p.action,key,match(p.candidates[0].id));
+  else push({kind:'choose',ids:p.candidates.map(i=>i.id),body,action:p.action,key,found:p.candidates.map(i=>match(i.id)).filter(Boolean)});
   if($('prompt').value.trim()===body){$('prompt').value='';save('draft','');draftID=null;save('draftID',null);}preview();
  }catch(err){toast(err.message);}finally{submit.disabled=false;}
 };
@@ -146,12 +155,12 @@ document.addEventListener('click',async e=>{
   if(k.view){view=k.view;filter=null;redraw();}
   if(k.project){filter=filter===k.project?null:k.project;view='map';redraw();}
   if(k.fold){folded.has(k.fold)?folded.delete(k.fold):folded.add(k.fold);save('folded',[...folded]);redraw();}
-  if(k.card)await detail(k.card);
+  if(k.card)await detail(k.card,k.seq);
   if(k.pick){if($('dialog').open)$('dialog').close();pin(k.pick,true);$('mode').value='send';preview();$('prompt').focus();}
   if(k.hide){$('dialog').close();await edit(k.hide,{hidden:true});}
   if(k.restore)await edit(k.restore,{hidden:false});
   if('clear' in k){focus=null;locked=false;save('target',null);save('locked',false);$('mode').value='auto';redraw();}
-  if(k.select){const m=messages[Number(k.n)];if(m.chosen)return;m.chosen=k.select;renderChat();try{await handle(item(k.select),m.body,m.action,m.key);save('chat',messages);}catch(err){delete m.chosen;renderChat();throw err;}}
+  if(k.select){const m=messages[Number(k.n)];if(m.chosen)return;m.chosen=k.select;renderChat();try{await handle(item(k.select),m.body,m.action,m.key,m.found?.find(f=>f.session===k.select));save('chat',messages);}catch(err){delete m.chosen;renderChat();throw err;}}
   if('copy' in k)await navigator.clipboard.writeText(messages[Number(k.copy)].body);
   if(b.id==='closeDialog')$('dialog').close();
   if(b.id==='connections')await settings();
@@ -159,7 +168,8 @@ document.addEventListener('click',async e=>{
   if(b.id==='viewAction'){const gs=state.groups.filter(g=>!filter||filter===g.id),collapse=!gs.every(g=>folded.has(g.id));gs.forEach(g=>collapse?folded.add(g.id):folded.delete(g.id));save('folded',[...folded]);redraw();}
  }catch(err){toast(err.message);}
 });
-$('mode').onchange=preview;$('prompt').oninput=()=>{draftID=null;save('draftID',null);save('draft',$('prompt').value);preview();};
+$('mode').onchange=preview;$('prompt').oninput=()=>{draftID=null;save('draftID',null);save('draft',$('prompt').value);preview();
+ clearTimeout(searchTimer);const q=$('prompt').value.trim();if(q)searchTimer=setTimeout(()=>search(q).then(preview,()=>{}),250);};
 $('prompt').onkeydown=e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){e.preventDefault();$('composer').requestSubmit();}};
 document.addEventListener('dragstart',e=>{const c=e.target.closest('[data-card]');if(c){dragging=true;e.dataTransfer.setData('application/x-thread-atlas',c.dataset.card);e.dataTransfer.effectAllowed='move';}});
 const zone=e=>e.target.closest('#hiddenDrop,#composer,[data-group]');
